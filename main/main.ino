@@ -1,36 +1,46 @@
-#include <ESP32Servo.h>
+//void loop() {
+//  String input = pRxCharacteristic->getValue();
+//  pRxCharacteristic->setValue("");
+//  Serial.println(input);
+//  delay(100);
+//
+//  int prosli_zarez = -1;
+//
+//  for (int i = 0; i < 3; i++){
+//    int zarez = input.indexOf(',', prosli_zarez + 1);
+//    vrednosti[i] = map(input.substring(prosli_zarez + 1, zarez).toInt(), 0, 100, 0, 180);
+//    prosli_zarez = zarez;
+//  }
+//  vrednosti[3] = map(input.substring(prosli_zarez + 1).toInt(), 0, 100, 0, 180);
+//  
+//  PostaviVrednostiMotora();
+//}
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
-
-#define RGB_BUILTIN 21
+#include <ESP32Servo.h>
 
 BLEServer *pServer = NULL;
 BLECharacteristic *pTxCharacteristic;
 BLECharacteristic *pRxCharacteristic;
 
 #define SERVICE_UUID           "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID_RX "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
-#define CHARACTERISTIC_UUID_TX "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+#define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
+#define RGB_BUILTIN 21
 
 Servo motori[4];
 const int pinoviMotori[] = {7, 8, 9, 10};
 int vrednosti[4];
-String input;
 
 void setup() {
-  rgbLedWrite(RGB_BUILTIN, 15, 0, 0);
   Serial.begin(115200);
-  
-  ESP32PWM::allocateTimer(0);
-  ESP32PWM::allocateTimer(1);
-  ESP32PWM::allocateTimer(2);
-  ESP32PWM::allocateTimer(3);
 
   InicijalizacijaMotora();
+  rgbLedWrite(RGB_BUILTIN, 15, 0, 0);  
   
-  BLEDevice::init("НАЈЈАЧИ ДРОН");
+  BLEDevice::init("UART Service");
   pServer = BLEDevice::createServer();
 
   // Create the BLE Service
@@ -48,23 +58,45 @@ void setup() {
 
   // Start advertising
   pServer->getAdvertising()->start();
+
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
 }
 
 void loop() {
-  String input = pRxCharacteristic->getValue();
+//  if (Serial.available() > 0){
+//    String poruka = Serial.readStringUntil('\n');
+//    poruka += '\n';
+//    pTxCharacteristic->setValue(poruka);
+//    pTxCharacteristic->notify();
+//    delay(10);
+//  }
+    
+  String rxValue = pRxCharacteristic->getValue();
   pRxCharacteristic->setValue("");
-  Serial.println(input);
 
-  int prosli_zarez = -1;
+  if (rxValue.length() > 0) {
+    int prosli_zarez = -1;
 
-  for (int i = 0; i < 3; i++){
-    int zarez = input.indexOf(',', prosli_zarez + 1);
-    vrednosti[i] = map(input.substring(prosli_zarez + 1, zarez).toInt(), 0, 100, 0, 180);
-    prosli_zarez = zarez;
+    for (int i = 0; i < 3; i++){
+      int zarez = rxValue.indexOf(',', prosli_zarez + 1);
+      vrednosti[i] = map(rxValue.substring(prosli_zarez + 1, zarez).toInt(), 0, 100, 0, 180);
+      prosli_zarez = zarez;
+    }
+    vrednosti[3] = map(rxValue.substring(prosli_zarez + 1).toInt(), 0, 100, 0, 180);
+    
+    PostaviVrednostiMotora();
+
+    for (int i = 0; i < 4; i++) {
+      Serial.print(vrednosti[i]);
+      Serial.print(" ");
+    }
+    Serial.println();
   }
-  vrednosti[3] = map(input.substring(prosli_zarez + 1).toInt(), 0, 100, 0, 180);
-  
-  PostaviVrednostiMotora();
+
+  delay(100);
 }
 
 void InicijalizacijaMotora(){
