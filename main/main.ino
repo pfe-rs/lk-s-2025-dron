@@ -1,20 +1,3 @@
-//void loop() {
-//  String input = pRxCharacteristic->getValue();
-//  pRxCharacteristic->setValue("");
-//  Serial.println(input);
-//  delay(100);
-//
-//  int prosli_zarez = -1;
-//
-//  for (int i = 0; i < 3; i++){
-//    int zarez = input.indexOf(',', prosli_zarez + 1);
-//    vrednosti[i] = map(input.substring(prosli_zarez + 1, zarez).toInt(), 0, 100, 0, 180);
-//    prosli_zarez = zarez;
-//  }
-//  vrednosti[3] = map(input.substring(prosli_zarez + 1).toInt(), 0, 100, 0, 180);
-//  
-//  PostaviVrednostiMotora();
-//}
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -78,22 +61,25 @@ void loop() {
   pRxCharacteristic->setValue("");
 
   if (rxValue.length() > 0) {
-    int prosli_zarez = -1;
-
-    for (int i = 0; i < 3; i++){
-      int zarez = rxValue.indexOf(',', prosli_zarez + 1);
-      vrednosti[i] = map(rxValue.substring(prosli_zarez + 1, zarez).toInt(), 0, 100, 0, 180);
-      prosli_zarez = zarez;
+    if (rxValue.length() <= 3) for (int i = 0; i < 4; i++) vrednosti[i] = rxValue.toInt();
+    else {
+      int prosli_zarez = -1;
+  
+      for (int i = 0; i < 3; i++){
+        int zarez = rxValue.indexOf(',', prosli_zarez + 1);
+        vrednosti[i] = map(rxValue.substring(prosli_zarez + 1, zarez).toInt(), 0, 100, 0, 180);
+        prosli_zarez = zarez;
+      }
+      vrednosti[3] = map(rxValue.substring(prosli_zarez + 1).toInt(), 0, 100, 0, 180);
+      
+      PostaviVrednostiMotora();
+  
+      for (int i = 0; i < 4; i++) {
+        Serial.print(vrednosti[i]);
+        Serial.print(" ");
+      }
+      Serial.println();
     }
-    vrednosti[3] = map(rxValue.substring(prosli_zarez + 1).toInt(), 0, 100, 0, 180);
-    
-    PostaviVrednostiMotora();
-
-    for (int i = 0; i < 4; i++) {
-      Serial.print(vrednosti[i]);
-      Serial.print(" ");
-    }
-    Serial.println();
   }
 
   delay(100);
