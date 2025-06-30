@@ -15,12 +15,13 @@ BLECharacteristic *pRxCharacteristic;
 
 IMU imu(Wire);
 #define RGB_BUILTIN 21
+#define MAX_MOTOR 180
 
 const double setpoint = 0;
 const double K[3][3] = {
   //  P    I     D
-  { 0.5,    0,    0 },    // pitch
-  { 0.25,   0,    0 },    // roll
+  { 0,      0,    0 },    // pitch
+  { 0,      0,    0 },    // roll
   { 0.1,    0,    0 }     // yaw
 };
 
@@ -56,23 +57,25 @@ void setup() {
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
+
+  KalibracijaMotora();
 }
 
 void loop() {
-//  unsigned long now = millis();
-//
-//  PID(now, lastTime);
-//  
+  unsigned long now = millis();
+
+  PID(now, lastTime);
+  
   ObradaDolaznihPodataka();
     
   PostaviVrednostiMotora();
   imu.Calculate();
   PlotPodataka();
   
-  delay(5);
+  delay(1);
   
-//  // End of cycle
-//  lastTime = now;
+  // End of cycle
+  lastTime = now;
 }
 
 void PlotPodataka() {
@@ -86,7 +89,7 @@ void ObradaDolaznihPodataka() {
   pRxCharacteristic->setValue("");
 
   if (rxValue.length() > 0) {
-    throttle = map(rxValue.toInt(), 0, 100, 0, 180);
+    throttle = map(rxValue.toInt(), 0, 100, 0, MAX_MOTOR);
     if (throttle == 0) for (int i = 0; i < 4; i++) vrednosti[i] = 0;
     else {
       vrednosti[0] = (throttle + output_pitch - output_roll - output_yaw);
@@ -96,12 +99,9 @@ void ObradaDolaznihPodataka() {
     
       for (int i = 0; i < 4; i++){
         if (vrednosti[i] < 0) vrednosti[i] = 0;
-        else if (vrednosti[i] > 180) vrednosti[i] = 180;
+        else if (vrednosti[i] > MAX_MOTOR) vrednosti[i] = MAX_MOTOR;
       }
     }
-    
-//    Serial.println("U obradi dolaznih podataka");
-//    Serial.println(throttle);
   }
 }
 
@@ -197,11 +197,14 @@ void PostaviVrednostiMotora() {
   for (int i = 0; i < 4; i++){
     motori[i].write(vrednosti[i]);
   }
-  
-//  Serial.println("Postavljene vrednosti gasa na motorima");
-//  for (int i = 0; i < 4; i++) {
-//    Serial.print(vrednosti[i]);
-//    Serial.print(" ");
-//  }
-//  Serial.println();
+}
+
+void KalibracijaMotora() {
+  for (int i = 0; i < 4; i++) vrednosti[i] = MAX_MOTOR;
+  PostaviVrednostiMotora();
+  delay(500);
+
+  for (int i = 0; i < 4; i++) vrednosti[i] = 0;
+  PostaviVrednostiMotora();
+  delay(500);
 }
