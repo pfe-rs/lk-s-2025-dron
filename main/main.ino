@@ -1,4 +1,32 @@
-#include <IMU_Fusion_SYC.h>
+
+int battery_pin = 11; // Pin to witch voltage divider is connected
+bool battery_protection;
+
+
+#include <Wire.h> // Library for I2C communication
+float roll_rate, pitch_rate, yaw_rate; // Gyro rates
+float desired_roll_rate, desired_pitch_rate, desired_yaw_rate; // Desired Gyro rates
+float error_roll_rate, error_pitch_rate, error_yaw_rate; // Error Gyro rates
+float previous_error_roll_rate, previous_error_pitch_rate, previous_error_yaw_rate; // Previous error Gyro rates
+float previous_roll_i, previous_pitch_i, previous_yaw_i; // Previous I values
+float roll_input, pitch_input, yaw_input; //Angle inputs
+float pid_return[] = {0, 0, 0};
+float pid_parameters [3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}}; // PID parameters matrix - Roll: P, I, D - Pitch: P, I, D - Yaw: P, I, D
+
+
+#include <ESP32Servo.h> // Library used for PWM signal
+bool arm;
+float throttle; // Used for vertical stabilization
+int min_motor_speed = 15;
+int max_motor_speed = 180;
+Servo motors[4];
+int motor_pins [4] = {7, 8, 9, 10};
+int motor_values [4] = {0, 0, 0, 0};
+
+
+uint32_t loop_timer;
+
+
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -13,198 +41,216 @@ BLECharacteristic *pRxCharacteristic;
 #define CHARACTERISTIC_UUID_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_UUID_TX "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"
 
-IMU imu(Wire);
-#define RGB_BUILTIN 21
-#define MAX_MOTOR 180
 
-const double setpoint = 0;
-const double K[3][3] = {
-  //  P    I     D
-  { 0,      0,    0 },    // pitch
-  { 0,      0,    0 },    // roll
-  { 0.1,    0,    0 }     // yaw
-};
+void Rx() {
+  
+  String rxValue = String(pRxCharacteristic->getValue().c_str());
+  pRxCharacteristic->setValue("");
 
-double input_pitch,   error_pitch,  errorSum_pitch,   lastError_pitch,  dError_pitch,   output_pitch;
-double input_roll,    error_roll,   errorSum_roll,    lastError_roll,   dError_roll,    output_roll;
-double input_yaw,     error_yaw,    errorSum_yaw,     lastError_yaw,    dError_yaw,     output_yaw;
+  if (rxValue.length() > 0) {
+    
+    if(rxValue.charAt(0) == 'a') {
+      Arm();
+    }
+ 
+    if(rxValue.charAt(0) == 't') {
+      throttle = rxValue.substring(1, rxValue.length()).toInt();
+    }
 
-const double Kp_pitch = K[0][0],  Ki_pitch = K[0][1],   Kd_pitch = K[0][2];
-const double Kp_roll = K[1][0],   Ki_roll = K[1][1],    Kd_roll = K[1][2];
-const double Kp_yaw = K[2][0],    Ki_yaw = K[2][1],     Kd_yaw = K[2][2];
+    if(rxValue.charAt(0) == 'p') {
+      pid_parameters[0][0] = rxValue.substring(1, rxValue.length()).toDouble();
+    }
 
-double P_pitch = 0,   I_pitch = 0,  D_pitch = 0;
-double P_roll = 0,    I_roll = 0,   D_roll = 0;
-double P_yaw = 0,     I_yaw = 0,    D_yaw = 0;
+     if(rxValue.charAt(0) == 'i') {
+      pid_parameters[0][1] = rxValue.substring(1, rxValue.length()).toDouble();
+    }
 
-unsigned long lastTime = 0;
+     if(rxValue.charAt(0) == 'd') {
+      pid_parameters[0][2] = rxValue.substring(1, rxValue.length()).toDouble();
+    }
+  } 
+}
 
-Servo motori[4];
-const int pinoviMotori[] = {7, 8, 9, 10};
-int vrednosti[4];
-int throttle;
+void Tx() {
+
+  char txString[128];
+  snprintf(txString, sizeof(txString), "%.2f,%.2f,%.2f,%.2f,%.2f,%.2f, %d,%d,%d,%d", error_roll_rate, Battery_voltage, pid_parameters[0][0], pid_parameters[0][1], pid_parameters[0][2], 0, motor_values[0], motor_values[1], motor_values[2], motor_values[3]);
+  pTxCharacteristic->setValue(txString);
+  pTxCharacteristic->notify();
+}
+
+void Ble_setup() {
+  
+  BLEDevice::init("UART Service");
+  pServer = BLEDevice::createServer();
+  BLEService *pService = pServer->createService(SERVICE_UUID);
+  pTxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_TX, BLECharacteristic::PROPERTY_NOTIFY);
+  pTxCharacteristic->addDescriptor(new BLE2902());
+  pRxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_RX, BLECharacteristic::PROPERTY_WRITE_NR);
+  pService->start();
+  pServer->getAdvertising()->start();
+}
+
+void PID(float error, float p, float i, float d, float previous_error, float previous_i) {
+  
+  float p_value = p * error;
+  
+  float i_value = previous_i + i * (error + previous_error) * 0.004 / 2;
+  if(i_value > 400) i_value = 400;
+  else if(i_value < -400) i_value = -400;
+
+  float d_value = d * (error - previous_error) / 0.004;
+  
+  float pid_output = p_value + i_value + d_value;
+  if(pid_output > 400) pid_output = 400;
+  else if(pid_output < -400) pid_output = -400;
+
+  pid_return[0] = pid_output;
+  pid_return[1] = error;
+  pid_return[2] = i_value; 
+}
+
+void PID_restart(void) {
+  
+  previous_error_roll_rate = 0;
+  previous_error_pitch_rate = 0;
+  previous_error_yaw_rate = 0;
+
+  previous_roll_i = 0;
+  previous_pitch_i = 0;
+  previous_yaw_i = 0;
+}
+
+void Gyro() {
+  
+  Wire.beginTransmission(0x68); // MPU6050 Adress
+  Wire.write(0x1A); // Low-Pass Filter
+  Wire.write(0x05); // Filter Bandwidth Frequency (10Hz)
+  Wire.endTransmission();
+
+  Wire.beginTransmission(0x68); // MPU6050 Adress
+  Wire.write(0x1B); // Sensitivity
+  Wire.write(0x8); // Sensitivity value (+-500 Degree/s <--> 65.5 LSB/s)
+  Wire.endTransmission();
+
+  Wire.beginTransmission(0x68); // MPU6050 Adress
+  Wire.write(0x43);
+  Wire.endTransmission();
+  
+  Wire.requestFrom(0x68,6); // Reading Gyro registers
+  
+  int16_t gyro_roll = Wire.read()<<8 | Wire.read(); // Combining registers for Roll
+  int16_t gyro_pitch = Wire.read()<<8 | Wire.read(); // Combining registers for Pitch
+  int16_t gyro_yaw = Wire.read()<<8 | Wire.read(); // Combining registers for Yaw
+
+  roll_rate = (float)gyro_roll / 65.5; // Converting to Degree/s
+  pitch_rate = (float)gyro_pitch / 65.5; // Converting to Degree/s
+  yaw_rate = (float)gyro_yaw / 65.5; // Converting to Degree/s
+
+  roll_rate += 0.04;
+  pitch_rate += 3.93;
+  yaw_rate -= 0.37;
+}
+
+float Battery_voltage() {
+  
+  uint16_t mv = analogReadMilliVolts(battery_pin);
+  return (mv * 6.4) / 1000.0;
+}
+
+void Battery_protection(float battery_voltage){
+
+  if(battery_voltage < 10 || battery_voltage > 13) battery_protection = 1;
+  else battery_protection = 0;
+}
+
+void Motor_setup(){
+
+  for (int i = 0; i < 4; i++) {
+  motors[i].setPeriodHertz(250);
+  motors[i].attach(motor_pins[i], 1000, 2000);
+  }
+}
+
+void Motor_power() {
+
+  motor_values[0] = battery_protection * arm * (throttle + roll_input + pitch_input - yaw_input);
+  motor_values[1] = battery_protection * arm * (throttle + roll_input - pitch_input + yaw_input);
+  motor_values[2] = battery_protection * arm * (throttle - roll_input + pitch_input + yaw_input);
+  motor_values[3] = battery_protection * arm * (throttle - roll_input - pitch_input - yaw_input);
+
+  for (int i = 0; i < 4; i++) {
+    motor_values[i] *= 1.8;
+    if (motor_values[i] < 0) motor_values[i] = 0;
+    else if (motor_values[i] > max_motor_speed) motor_values[i] = max_motor_speed;
+    motors[i].write(max(motor_values[i],min_motor_speed * arm));
+  }
+}
+
+void Arm() {
+  arm = !arm;
+  if(arm) PID_restart();
+}
 
 void setup() {
-  rgbLedWrite(RGB_BUILTIN, 15, 0, 0); // Informacija da smo poceli da radimo
-  
+
+  rgbLedWrite(21, 255, 0, 0);
   Serial.begin(115200);
   
-  InicijalizacijaMotora();
-  InicijalizacijaBluetootha();
-  InicijalizacijaSenzora();
+  Wire.setClock(400000);
+  Wire.begin(13,12);
+  delay(1000);
+  Wire.beginTransmission(0x68);
+  Wire.write(0x6B);
+  Wire.write(0x00);
+  Wire.endTransmission();
 
+  Motor_setup();
+  Ble_setup();
+  
   ESP32PWM::allocateTimer(0);
   ESP32PWM::allocateTimer(1);
   ESP32PWM::allocateTimer(2);
   ESP32PWM::allocateTimer(3);
 
-  KalibracijaMotora();
+  analogReadResolution(12);
+  analogSetAttenuation(ADC_11db);
+  
+  loop_timer = micros();
 }
 
 void loop() {
-  unsigned long now = millis();
 
-  PID(now, lastTime);
-  
-  ObradaDolaznihPodataka();
-    
-  PostaviVrednostiMotora();
-  imu.Calculate();
-  PlotPodataka();
-  
-  delay(1);
-  
-  // End of cycle
-  lastTime = now;
-}
+  Battery_protection(Battery_voltage());
+  Rx();
+  Tx();
+  Gyro();
 
-void PlotPodataka() {
-  Serial.print("Pitch: "); Serial.print(imu.getAngleY()); Serial.print(" ");
-  Serial.print("Roll: "); Serial.print(-imu.getAngleX()); Serial.print(" ");
-  Serial.print("Yaw: "); Serial.print(imu.getAngleZ()); Serial.println();
-}
+  desired_roll_rate = 0;
+  desired_pitch_rate = 0;
+  desired_yaw_rate = 0;
 
-void ObradaDolaznihPodataka() {
-  String rxValue = pRxCharacteristic->getValue();
-  pRxCharacteristic->setValue("");
+  error_roll_rate = desired_roll_rate - roll_rate;
+  error_pitch_rate = desired_pitch_rate - pitch_rate;
+  error_yaw_rate = desired_yaw_rate - yaw_rate;
 
-  if (rxValue.length() > 0) {
-    throttle = map(rxValue.toInt(), 0, 100, 0, MAX_MOTOR);
-    if (throttle == 0) for (int i = 0; i < 4; i++) vrednosti[i] = 0;
-    else {
-      vrednosti[0] = (throttle + output_pitch - output_roll - output_yaw);
-      vrednosti[1] = (throttle - output_pitch - output_roll + output_yaw);
-      vrednosti[2] = (throttle + output_pitch + output_roll + output_yaw);
-      vrednosti[3] = (throttle - output_pitch + output_roll - output_yaw);
-    
-      for (int i = 0; i < 4; i++){
-        if (vrednosti[i] < 0) vrednosti[i] = 0;
-        else if (vrednosti[i] > MAX_MOTOR) vrednosti[i] = MAX_MOTOR;
-      }
-    }
-  }
-}
+  PID(error_roll_rate, pid_parameters[0][0], pid_parameters[0][1], pid_parameters[0][2], previous_error_roll_rate, previous_roll_i);
+  roll_input = pid_return[0];
+  previous_error_roll_rate = pid_return[1];
+  previous_roll_i = pid_return[2];
 
-void PID(unsigned long now, unsigned long lastTime) {
-  double dt = (double)(now - lastTime);
-  imu.Calculate();
+  PID(error_pitch_rate, pid_parameters[1][0], pid_parameters[1][1], pid_parameters[1][2], previous_error_pitch_rate, previous_pitch_i);
+  pitch_input = pid_return[0];
+  previous_error_pitch_rate = pid_return[1];
+  previous_pitch_i = pid_return[2];
 
-  // Pitch PID
-  input_pitch = imu.getAngleY();
-  
-  error_pitch = setpoint - input_pitch;
-  P_pitch = Kp_pitch * error_pitch;
-  
-  errorSum_pitch += (error_pitch * dt);
-  I_pitch = Ki_pitch * errorSum_pitch;
-  
-  dError_pitch = (error_pitch - lastError_pitch) / dt;
-  D_pitch = Kd_pitch * dError_pitch;
+  PID(error_yaw_rate, pid_parameters[2][0], pid_parameters[2][1], pid_parameters[2][2], previous_error_yaw_rate, previous_yaw_i);
+  yaw_input = pid_return[0];
+  previous_error_yaw_rate = pid_return[1];
+  previous_yaw_i = pid_return[2];
 
-  output_pitch = P_pitch + I_pitch + D_pitch;
-  
-  lastError_pitch = error_pitch;
+  Motor_power();
 
-  // Roll PID
-  input_roll = -imu.getAngleX();
-  
-  error_roll = setpoint - input_roll;
-  P_roll = Kp_roll * error_roll;
-  
-  errorSum_roll += (error_roll * dt);
-  I_roll = Ki_roll * errorSum_roll;
-  
-  dError_roll = (error_roll - lastError_roll) / dt;
-  D_roll = Kd_roll * dError_roll;
-
-  output_roll = P_roll + I_roll + D_roll;
-  
-  lastError_roll = error_roll;
-
-  // Yaw PID
-  input_yaw = imu.getAngleZ();
-  
-  error_yaw = setpoint - input_yaw;
-  P_yaw = Kp_yaw * error_yaw;
-  
-  errorSum_yaw += (error_yaw * dt);
-  I_yaw = Ki_yaw * errorSum_yaw;
-  
-  dError_yaw = (error_yaw - lastError_yaw) / dt;
-  D_yaw = Kd_yaw * dError_yaw;
-
-  output_yaw = P_yaw + I_yaw + D_yaw;
-  
-  lastError_yaw = error_yaw;
-}
-
-void InicijalizacijaMotora() {
-  for (int i = 0; i < 4; i++){
-    motori[i].setPeriodHertz(50);
-    motori[i].attach(pinoviMotori[i], 1000, 2000);
-  }
-}
-
-void InicijalizacijaBluetootha() {
-  // Inicijalizacija Bluetooth-a
-  BLEDevice::init("UART Service");
-  pServer = BLEDevice::createServer();
-
-  // Podesavanje servisa
-  BLEService *pService = pServer->createService(SERVICE_UUID);
-  pTxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_TX, BLECharacteristic::PROPERTY_NOTIFY);
-  pTxCharacteristic->addDescriptor(new BLE2902());
-  pRxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_UUID_RX, BLECharacteristic::PROPERTY_WRITE);
-
-  // Paljenje servera i ucini ga vidljivim
-  pService->start();
-  pServer->getAdvertising()->start();
-}
-
-void InicijalizacijaSenzora() {
-  // IIC protokol
-  Wire.begin(13, 12);
-
-  // Ziroskop i akcelometar
-  imu.begin(CHOOSE_MPU6050);
-  imu.MPU6050_CalcGyroOffsets();
-
-  // Ultrazvucni senzor
-  // treba da se doda...
-}
-
-void PostaviVrednostiMotora() {
-  for (int i = 0; i < 4; i++){
-    motori[i].write(vrednosti[i]);
-  }
-}
-
-void KalibracijaMotora() {
-  for (int i = 0; i < 4; i++) vrednosti[i] = MAX_MOTOR;
-  PostaviVrednostiMotora();
-  delay(500);
-
-  for (int i = 0; i < 4; i++) vrednosti[i] = 0;
-  PostaviVrednostiMotora();
-  delay(500);
+  while(micros() - loop_timer < 4000);
+  loop_timer = micros();
 }
